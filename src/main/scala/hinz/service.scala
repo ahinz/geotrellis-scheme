@@ -22,6 +22,17 @@ object Main {
     }
 
   val echo = unfiltered.netty.cycle.Planify {
+    case Path(Seg("runner" :: "text" :: Nil)) & Params(params) => {
+      val p = SimpleParser(params.get("p").get.head)
+      println(p)
+
+      ResponseString(wrapCB(params)(SexpHandler.handle(p.get) match {
+      case Left(e) => """{ error: "%s" }""" format e
+      case Right((LiteralNode(a),_)) => """{ result: "%s" }""" format a.toString
+      case Right((a,_)) => """{ error: "Non-literal return value (%s)" } """ format a.toString
+      }))
+
+    }
     case Path(Seg("runner" :: Nil)) & Params(params) => {
       
       val p = SimpleParser(params.get("p").get.head)
@@ -34,7 +45,7 @@ object Main {
       // }))
 
       ResponseBytes(SexpHandler.handle(p.get) match {
-        case Right((LiteralNode(a:Array[Byte]),_)) => a
+        case Right((LiteralNode(a:Array[Byte]),st)) => { println(st); a }
         case Right((a,_)) => error("Non-literal return value (%s)" format a.toString)
         case z => error("unnkown match error (%s)" format z)
       })

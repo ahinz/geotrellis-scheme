@@ -2,6 +2,11 @@ package org.hinz.parsing
 
 import scala.util.parsing.combinator._
 
+case class Context(symbols: Map[String,Node], lambdaCtr: Int) {
+  def addSymbols(s: Map[String,Node]) = Context(symbols ++ s, lambdaCtr)
+  def nextLambdaName() = ("lambda<%d>" format lambdaCtr, Context(symbols, lambdaCtr + 1))
+}
+
 sealed trait Node
 case object UnitNode extends Node
 case object FalseNode extends Node
@@ -11,17 +16,18 @@ case class LiteralNode[T](lit: T) extends Node
 case class IntLitNode(value: Int) extends LiteralNode[Int](value)
 case class StrLitNode(value: String) extends LiteralNode[String](value)
 case class FunctionNode(id: String, bindings: List[String], body: Node) extends Node
-case class InternalFunctionNode(id: String, f: List[Node] => Either[String,Node]) extends Node
+case class InternalFunctionNode(id: String, f: (List[Node],Context) => Either[String,Node]) extends Node
 
 object SimpleParser extends RegexParsers {
 
-  val ID:Parser[Node] = """[a-zA-Z_+-][a-zA-Z_0-9!/-]*""".r ^^ { IdentNode(_) }
+  val ID:Parser[Node] = """[a-zA-Z_+-><][a-zA-Z_0-9!/-]*""".r ^^ { IdentNode(_) }
   val FalseLit = "false" ^^ { a => FalseNode }
   val IntLit = "[0-9]+".r ^^ { s => IntLitNode(s.toInt) }
+  val HexLit = "0x[0-9a-fA-F]+".r ^^ { s => IntLitNode(Integer.parseInt(s.substring(2),16)) }
   val StrLit = "\"".r ~> "[^\"]+".r <~ "\"" ^^ { a => StrLitNode(a.toString()) }
 
   def slist:Parser[Node] = ("(" ~> rep(sexp) <~ ")") ^^ { ListNode(_) }
-  def sexp:Parser[Node] = FalseLit | IntLit | StrLit | ID | slist 
+  def sexp:Parser[Node] = FalseLit | HexLit | IntLit | StrLit | ID | slist 
 
   def program = sexp*
 
@@ -39,31 +45,46 @@ object GeoTrellis {
  
 
   val trellisFns:Map[String, Node] = Map(
-    "trellis/loadfile" -> InternalFunctionNode("trellis", _ match {
+    "scala/tuple2i" -> InternalFunctionNode("tuple2i", (a,b) => a match {
+      case List(IntLitNode(x),IntLitNode(y)) => Right(LiteralNode((x,y)))
+      case a => Left("trellis/loadfile expects 1 argument (got %s)" format a)
+    }),
+    "trellis/loadfile" -> InternalFunctionNode("trellis", (a,b) => a match {
       case List(StrLitNode(file)) => Right(LiteralNode(LoadFile(file)))
       case a => Left("trellis/loadfile expects 1 argument (got %s)" format a)
     }),
-    "trellis/hillshade" -> InternalFunctionNode("trellis", _ match {
+    "trellis/hillshade" -> InternalFunctionNode("trellis", (a,b) => a match {
       case List(LiteralNode(l:Op[IntRaster])) => Right(LiteralNode(Hillshade(l, 45.0, 20.0)))
       case a => Left("hillshade expects 1 argument (got %s)" format a)
     }),
-    "trellis/histogram" -> InternalFunctionNode("trellis", _ match {
+    "trellis/histogram" -> InternalFunctionNode("trellis", (a,b) => a match {
       case List(LiteralNode(l:Op[IntRaster])) => Right(LiteralNode(BuildMapHistogram(l)))
       case a => Left("histogram expects 1 argument (got %s)" format a)
     }),
-    "trellis/stats" -> InternalFunctionNode("trellis", _ match {
+    "trellis/stats" -> InternalFunctionNode("trellis", (a,b) => a match {
       case List(LiteralNode(l:Op[Histogram])) => Right(LiteralNode(GenerateStatistics(l)))
       case a => Left("stats expects 1 argument (got %s)" format a)
     }),      
-    "trellis/image" -> InternalFunctionNode("trellis", _ match {
+    "trellis/image" -> InternalFunctionNode("trellis", (a,b) => a match {
       case List(LiteralNode(l:Op[IntRaster])) => Right(LiteralNode(RenderPngRgba(l)))
+      case List(LiteralNode(l:Op[IntRaster]), LiteralNode(cb:Op[ColorBreaks])) =>
+        Right(LiteralNode(RenderPNG(l, cb, 0, true)))
       case a => Left("trellis image expects 1 argument (got %s)" format a)
     }),
-    "trellis/resample" -> InternalFunctionNode("trellis", _ match {
+    "trellis/colorbreaks" -> InternalFunctionNode("trellis", (a,b) => a match {
+      case (l:List[IntLitNode]) => Right(LiteralNode(Literal(ColorBreaks(l.grouped(2).toArray.map(z => (z(0).value,z(1).value))))))
+      case a => Left("could not construct color breaks with %s" format a)
+    }),
+    "trellis/colorbreaks2" -> InternalFunctionNode("trellis", (a,b) => a match {
+      case List(LiteralNode(l:List[LiteralNode[(Int,Int)]])) => { 
+        Right(LiteralNode(Literal(ColorBreaks(l.map(_.lit).toArray)))) }
+      case a => Left("could not construct color breaks with %s" format a)
+    }),
+    "trellis/resample" -> InternalFunctionNode("trellis", (a,b) => a match {
       case List(LiteralNode(l:Op[IntRaster]), IntLitNode(width), IntLitNode(height)) => Right(LiteralNode(ResampleRaster(l,width,height)))
       case a => Left("trellis resample expects three arguments (got %s)" format a)
     }),
-    "trellis/run" -> InternalFunctionNode("trellis", _ match {
+    "trellis/run" -> InternalFunctionNode("trellis", (a,b) => a match {
       case List(LiteralNode(l:Op[IntRaster])) => Right(LiteralNode(Server("server", Catalog("",Map())).run(l)))
       case a => Left("run expects 1 argument (got %s)" format a)
     })
@@ -106,7 +127,7 @@ object Helpers {
   })
 
   implicit def autoRaiseFn[T,R](f: List[T] => R)(implicit convert: FromNode[T]): InternalFunctionNode =
-     InternalFunctionNode("ifn", (l => {
+     InternalFunctionNode("ifn", ((l,z) => {
        seq(l.map(n => convert(n))).right.map(args => f(args) match {
          case z:Int => IntLitNode(z)
          case z => LiteralNode(z)
@@ -121,23 +142,46 @@ object SexpHandler {
   import Helpers._
   import scala.io.Source._
 
-  val eqf = InternalFunctionNode("ifn-eq", ((a:List[Node]) => Right(boolNode(a.map(_.equals(a.head)).reduceLeft(_ && _)))))
+  val eqf = InternalFunctionNode("ifn-eq", ((a:List[Node],c:Context) => Right(boolNode(a.map(_.equals(a.head)).reduceLeft(_ && _)))))
+
+  def id[T](t:List[T]) = t
 
   val baseSymbolTable:Map[String,Node] = trellisFns ++ Map[String,Node](
-    "+" -> ((_:List[Int]).reduceLeft(_+_)),
+    ">" -> InternalFunctionNode("gr", (a,b) => a match { 
+      case List(IntLitNode(a), IntLitNode(b)) => Right(if (a > b) IntLitNode(1) else FalseNode)
+      case s => error("> fn error with %s" format s)
+    }),
+    "list" -> InternalFunctionNode("list", (a,b) => a match { 
+      case l:List[Node] => Right(LiteralNode(l))
+      case s => error("parse error while creating list with %s" format s)
+    }),
+    "append" -> InternalFunctionNode("append", (a,b) => a match {
+      case LiteralNode(l:List[Node]) :: rest => Right(LiteralNode(l ++ rest))
+      case s => error("parse error while creating list with %s" format s)
+    }),
+    "prepend" -> InternalFunctionNode("append", (a,b) => a match {
+      case LiteralNode(l:List[Node]) :: rest => Right(LiteralNode(rest ++ l))
+      case s => error("parse error while creating list with %s" format s)
+    }),
+    "map" -> InternalFunctionNode("map", (a,ctxt) => a match {
+      case List(f:FunctionNode, LiteralNode(l:List[Node])) =>
+        seq(l.map(x => {
+          val rslt = applyFn(f, List(x), ctxt)
+          rslt.right.map(_._1)
+        })).right.map(n => LiteralNode(n))          
+      case s => error("parse error while creating list with %s" format s)
+    }),
+    "add" -> ((_:List[Int]).reduceLeft(_+_)),
+    "times" -> ((_:List[Int]).reduceLeft(_*_)),
+    "div" -> ((_:List[Int]).reduceLeft(_/_)),
     "-" -> ((_:List[Int]).reduceLeft(_-_)),
     "eq" -> eqf,
     "print" -> ((a:List[String]) => println(a.mkString(" "))))
 
-  case class Context(symbols: Map[String,Node], lambdaCtr: Int) {
-    def addSymbols(s: Map[String,Node]) = Context(symbols ++ s, lambdaCtr)
-    def nextLambdaName() = ("lambda<%d>" format lambdaCtr, Context(symbols, lambdaCtr + 1))
-  }
-
   val defaultContext = Context(baseSymbolTable, 0)
 
   def applyFn(fNode: Node, args: List[Node], t: Context):Either[String,(Node,Context)] = fNode match {
-    case InternalFunctionNode(id, fn) => fn(args).right.map((_,t))
+    case InternalFunctionNode(id, fn) => fn(args,t).right.map((_,t))
     case FunctionNode(_, argNames, body) => handle(body, t.addSymbols(Map(argNames.zip(args):_*)))
     case _ => Left("%s is not a callback function (args: %s)" format (fNode, args.mkString(", ")))
   }

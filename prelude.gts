@@ -1,9 +1,9 @@
-(def create-raster (str)
-     (scala-lib/create-raster str))
+;; (def list (args)) -> List
+;; (def append (list,item)) -> List
 
-(def radd (n)
-     (if (eq n 0)
-         0
-       (+ n (radd (- n 1)))))
-       
-(print "Result:" (radd 5))
+(def interval (start, stop, ival)
+   (if (> start stop)
+      (list ())
+      (append 
+        (interval (+ start ival) stop ival)
+        start)))
